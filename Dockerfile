@@ -1,27 +1,41 @@
-ARG BASE_IMAGE=alpine
+ARG BASE_IMAGE=registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275
 
-FROM --platform=$BUILDPLATFORM tonistiigi/xx:1.6.1@sha256:923441d7c25f1e2eb5789f82d987693c47b8ed987c4ab3b075d6ed2b5d6779a3 AS xx
+# ---------------------------------------------------------------------------
+# Builder: golang:1.24.3-alpine3.20  →  ubi9/ubi:9.8 + Go 1.24.3 tarball
+# Full UBI9 (not minimal) is used here to get dnf, gcc, and the C toolchain
+# needed for CGO. This stage is build-time only — zero layers reach the final
+# image. GOARCH/GOOS fixed to amd64 (no cross-compile toolchain required).
+# ---------------------------------------------------------------------------
+FROM --platform=$BUILDPLATFORM registry.access.redhat.com/ubi9/ubi:9.8-1782841664 AS builder
 
-FROM --platform=$BUILDPLATFORM golang:1.24.3-alpine3.20@sha256:9f98e9893fbc798c710f3432baa1e0ac6127799127c3101d2c263c3a954f0abe AS builder
+RUN dnf install -y \
+        --disableplugin=subscription-manager \
+        --setopt=install_weak_deps=False \
+        gcc \
+        make \
+        openssl-devel \
+        ca-certificates \
+        tar \
+        gzip \
+        git \
+        glibc-static \
+        glibc-devel \
+        libstdc++-static && \
+    dnf clean all
 
-COPY --from=xx / /
+ENV GO_VERSION=1.24.3
+RUN curl -fsSL "https://dl.google.com/go/go${GO_VERSION}.linux-amd64.tar.gz" \
+    | tar -C /usr/local -xz
 
-RUN apk add --update alpine-sdk ca-certificates openssl clang lld
-
-ARG TARGETPLATFORM
-
-RUN xx-apk --update add musl-dev gcc
-
-# lld has issues building static binaries for ppc so prefer ld for it
-RUN [ "$(xx-info arch)" != "ppc64le" ] || XX_CC_PREFER_LINKER=ld xx-clang --setup-target-triple
-
-RUN xx-go --wrap
+ENV PATH="/usr/local/go/bin:${PATH}"
+ENV GOPATH=/go
+ENV CGO_ENABLED=1
+ENV GOARCH=amd64
+ENV GOOS=linux
 
 WORKDIR /usr/local/src/dex
 
 ARG GOPROXY
-
-ENV CGO_ENABLED=1
 
 COPY go.mod go.sum ./
 COPY api/v2/go.mod api/v2/go.sum ./api/v2/
@@ -33,29 +47,38 @@ COPY . .
 ARG VERSION
 RUN make release-binary
 
-RUN xx-verify /go/bin/dex && xx-verify /go/bin/docker-entrypoint
-
-FROM alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c AS stager
+# ---------------------------------------------------------------------------
+# Stager: alpine:3.21.3  →  ubi9/ubi-minimal:9.8-1782797275
+# ---------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275 AS stager
 
 RUN mkdir -p /var/dex
 RUN mkdir -p /etc/dex
 COPY config.docker.yaml /etc/dex/
 
-FROM alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c AS gomplate
+# ---------------------------------------------------------------------------
+# Gomplate: alpine:3.21.3  →  ubi9/ubi-minimal:9.8-1782797275
+# wget (Alpine) replaced with curl-minimal (pre-installed in ubi9-minimal).
+# ARG defaults fixed to linux/amd64; TARGETVARIANT kept for parity.
+# ---------------------------------------------------------------------------
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275 AS gomplate
 
-ARG TARGETOS
-ARG TARGETARCH
+ARG TARGETOS=linux
+ARG TARGETARCH=amd64
 ARG TARGETVARIANT
 
 ENV GOMPLATE_VERSION=v4.3.0
 
-RUN wget -O /usr/local/bin/gomplate \
-  "https://github.com/hairyhenderson/gomplate/releases/download/${GOMPLATE_VERSION}/gomplate_${TARGETOS:-linux}-${TARGETARCH:-amd64}${TARGETVARIANT}" \
-  && chmod +x /usr/local/bin/gomplate
+RUN curl -fsSL -o /usr/local/bin/gomplate \
+    "https://github.com/hairyhenderson/gomplate/releases/download/${GOMPLATE_VERSION}/gomplate_${TARGETOS}-${TARGETARCH}${TARGETVARIANT}" \
+    && chmod +x /usr/local/bin/gomplate
 
 # For Dependabot to detect base image versions
-FROM alpine:3.21.3@sha256:a8560b36e8b8210634f77d9f7f9efd7ffa463e380b75e2e74aff4511df3ef88c AS alpine
-FROM gcr.io/distroless/static-debian12:nonroot@sha256:188ddfb9e497f861177352057cb21913d840ecae6c843d39e00d44fa64daa51c AS distroless
+# alpine:3.21.3  →  ubi9/ubi-minimal:9.8-1782797275
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275 AS ubi9-minimal
+
+# gcr.io/distroless/static-debian12:nonroot  →  ubi9/ubi-minimal:9.8-1782797275
+FROM registry.access.redhat.com/ubi9/ubi-minimal:9.8-1782797275 AS distroless
 
 FROM $BASE_IMAGE
 
@@ -64,7 +87,7 @@ FROM $BASE_IMAGE
 # experience when this doesn't work out of the box.
 #
 # See https://go.dev/src/crypto/x509/root_linux.go for Go root CA bundle locations.
-COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/ca-certificates.crt
+COPY --from=builder /etc/pki/tls/certs/ca-bundle.crt /etc/ssl/certs/ca-certificates.crt
 
 COPY --from=stager --chown=1001:1001 /var/dex /var/dex
 COPY --from=stager --chown=1001:1001 /etc/dex /etc/dex
