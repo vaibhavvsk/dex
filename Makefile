@@ -12,6 +12,11 @@ ORG_PATH  = github.com/dexidp
 REPO_PATH = $(ORG_PATH)/$(PROJ)
 VERSION  ?= $(shell ./scripts/git-version)
 
+# Docker image settings
+IMAGE_REPO      ?= dex
+IMAGE_TAG       ?= $(VERSION)-ubi9
+DOCKERFILE_UBI9  = Dockerfile.ubi9
+
 
 export GOBIN=$(PWD)/bin
 LD_FLAGS="-w -X main.version=$(VERSION)"
@@ -179,6 +184,17 @@ bin/kind:
 	@mkdir -p bin
 	curl -L https://github.com/kubernetes-sigs/kind/releases/download/v${KIND_VERSION}/kind-$(shell uname | tr A-Z a-z)-amd64 > ./bin/kind
 	@chmod +x ./bin/kind
+
+##@ Docker
+
+.PHONY: docker-build
+docker-build: ## Build the UBI9-based container image (linux/amd64). VERSION is auto-detected from git tag.
+	docker build \
+		--build-arg VERSION=$(VERSION) \
+		--build-arg GOPROXY=$(GOPROXY) \
+		-t $(IMAGE_REPO):$(IMAGE_TAG) \
+		-f $(DOCKERFILE_UBI9) \
+		.
 
 ##@ Clean
 clean: ## Delete all builds and downloaded dependencies.
