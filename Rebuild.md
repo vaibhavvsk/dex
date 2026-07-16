@@ -144,18 +144,80 @@ docker buildx build \
 
 ---
 
-## Verify the Image
+## Validate the Image
+
+### 1. Smoke tests — no config needed
 
 ```bash
-# Check Dex version and Go runtime
+# Binary version (confirms the binary runs and version is embedded)
 docker run --rm us.icr.io/dex/dex:v2.43.0_ubi9 dex version
 
-# Confirm the base OS is RHEL9
+# Confirm RHEL9 runtime base
 docker run --rm --entrypoint cat us.icr.io/dex/dex:v2.43.0_ubi9 /etc/redhat-release
 
-# Inspect image size and metadata
+# Confirm all expected binaries are present
+docker run --rm --entrypoint ls us.icr.io/dex/dex:v2.43.0_ubi9 /usr/local/bin/
+# expect: dex  docker-entrypoint  gomplate
+
+# Confirm CA certs are in place (needed for OIDC connectors)
+docker run --rm --entrypoint ls us.icr.io/dex/dex:v2.43.0_ubi9 /etc/ssl/certs/ca-certificates.crt
+
+# Confirm non-root user
+docker run --rm --entrypoint id us.icr.io/dex/dex:v2.43.0_ubi9
+# expect: uid=1001 gid=1001
+```
+
+### 2. Functional test — run the server with the bundled config
+
+```bash
+docker run --rm \
+  -p 5556:5556 \
+  -e DEX_ISSUER=http://localhost:5556/dex \
+  -e DEX_ENABLE_PASSWORD_DB=true \
+  -e DEX_CONNECTORS_ENABLE_MOCK=true \
+  us.icr.io/dex/dex:v2.43.0_ubi9
+```
+
+Then in a second terminal confirm the HTTP endpoints respond:
+
+```bash
+# OIDC discovery endpoint — must return JSON
+curl -s http://localhost:5556/dex/.well-known/openid-configuration | head -5
+
+# Health check endpoint
+curl -s http://localhost:5556/dex/healthz
+
+# Token keys endpoint
+curl -s http://localhost:5556/dex/keys
+```
+
+### 3. Image inspection
+
+```bash
+# Size and creation timestamp
 docker image inspect us.icr.io/dex/dex:v2.43.0_ubi9 \
   --format 'Size: {{.Size}} bytes | Created: {{.Created}}'
+
+# Confirm entrypoint and default command
+docker image inspect us.icr.io/dex/dex:v2.43.0_ubi9 \
+  --format 'Entrypoint: {{.Config.Entrypoint}} | Cmd: {{.Config.Cmd}}'
+
+# Confirm running user
+docker image inspect us.icr.io/dex/dex:v2.43.0_ubi9 \
+  --format 'User: {{.Config.User}}'
+# expect: 1001:1001
+```
+
+### 4. All smoke tests in one shot
+
+```bash
+IMAGE=us.icr.io/dex/dex:v2.43.0_ubi9
+
+docker run --rm $IMAGE dex version && \
+docker run --rm --entrypoint cat $IMAGE /etc/redhat-release && \
+docker run --rm --entrypoint id $IMAGE && \
+docker run --rm --entrypoint ls $IMAGE /usr/local/bin/ && \
+echo "ALL CHECKS PASSED"
 ```
 
 Expected output:
@@ -163,20 +225,10 @@ Expected output:
 Dex Version: v2.43.0
 Go Version: go1.24.3
 Go OS/ARCH: linux amd64
----
 Red Hat Enterprise Linux release 9.8 (Plow)
-```
-
----
-
-## Run the Image
-
-```bash
-docker run --rm \
-  -p 5556:5556 \
-  -e DEX_ISSUER=http://localhost:5556/dex \
-  us.icr.io/dex/dex:v2.43.0_ubi9 \
-  dex serve /etc/dex/config.docker.yaml
+uid=1001 gid=1001
+dex  docker-entrypoint  gomplate
+ALL CHECKS PASSED
 ```
 
 ---
